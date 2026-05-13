@@ -1,0 +1,24 @@
+# Xcode build artefacts
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcworkspace/xcuserdata/
+*.moved-aside
+*.pbxuser
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# CocoaPods / Carthage (not used here, but safe to have)
+Pods/
+Carthage/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Test results
+*.xcresult
