@@ -13,15 +13,15 @@ typedef struct VNCClientHandle VNCClientHandle;
 // Called on each framebuffer update rectangle with BGRA pixel data.
 // width/height are the full framebuffer dimensions; the pixel buffer
 // covers the entire framebuffer (may be partial updates accumulated).
-typedef void (*VNCFramebufferCallback)(const unsigned char *pixels,
+typedef void (*VNCFramebufferCallback)(const unsigned char * _Nullable pixels,
                                        int width, int height,
-                                       void *userdata);
+                                       void * _Nullable userdata);
 
 // Called when the connection is lost or an error occurs.
-typedef void (*VNCErrorCallback)(const char *message, void *userdata);
+typedef void (*VNCErrorCallback)(const char * _Nullable message, void * _Nullable userdata);
 
 // Creates a new VNC client instance. Returns NULL on allocation failure.
-VNCClientHandle *vncclient_create(void);
+VNCClientHandle * _Nullable vncclient_create(void);
 
 // Sets the VNC password used during authentication.
 void vncclient_set_password(VNCClientHandle * _Nullable client, const char * _Nullable password);
