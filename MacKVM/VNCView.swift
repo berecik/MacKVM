@@ -498,26 +498,32 @@ private func uiKeyToKeysym(_ key: UIKey) -> UInt32? {
 
 #if os(macOS)
 private func x11Keysym(for event: NSEvent) -> UInt32? {
-    // Handle special keys first
-    guard let chars = event.charactersIgnoringModifiers, !chars.isEmpty else {
-        return specialKeysym(event.keyCode)
-    }
+    // Always try keyCode-based lookup first.
+    // macOS function/special keys return private-use Unicode chars (0xF700+) in
+    // charactersIgnoringModifiers which are non-empty, so checking characters first
+    // would produce wrong Unicode keysyms (0x01000000 | 0xF7xx) for those keys.
+    if let sym = specialKeysym(event.keyCode) { return sym }
+
+    // Printable character fallback
+    guard let chars = event.charactersIgnoringModifiers, !chars.isEmpty else { return nil }
     let scalar = chars.unicodeScalars.first!.value
     // Latin-1 passthrough (0x20..0xFF)
     if scalar >= 0x20 && scalar <= 0xFF { return scalar }
-    // BMP characters map to Unicode keysyms (0x01000000 | codepoint)
-    if scalar >= 0x100 { return 0x01000000 | scalar }
-    return specialKeysym(event.keyCode) ?? scalar
+    // BMP characters above Latin-1, excluding macOS private-use range (0xF700–0xF8FF)
+    if scalar >= 0x100 && scalar < 0xF700 { return 0x01000000 | scalar }
+    return nil
 }
 
 private func specialKeysym(_ keyCode: UInt16) -> UInt32? {
     // macOS virtual key codes → X11 keysyms
     switch keyCode {
+    // Control keys
     case 36:  return 0xFF0D // Return
     case 48:  return 0xFF09 // Tab
     case 49:  return 0x0020 // Space
     case 51:  return 0xFF08 // BackSpace
     case 53:  return 0xFF1B // Escape
+    // Modifier keys
     case 55:  return 0xFFE3 // Left Cmd → Left Ctrl (KVM)
     case 56:  return 0xFFE1 // Left Shift
     case 57:  return 0xFFE5 // Caps Lock
@@ -527,17 +533,36 @@ private func specialKeysym(_ keyCode: UInt16) -> UInt32? {
     case 61:  return 0xFFEA // Right Alt
     case 62:  return 0xFFE4 // Right Ctrl
     case 63:  return 0xFFEB // Fn → Super
+    // Navigation
     case 123: return 0xFF51 // Left arrow
     case 124: return 0xFF53 // Right arrow
     case 125: return 0xFF54 // Down arrow
     case 126: return 0xFF52 // Up arrow
     case 115: return 0xFF50 // Home
     case 116: return 0xFF55 // Page Up
-    case 117: return 0xFFFF // Delete
+    case 117: return 0xFFFF // Delete (forward)
     case 119: return 0xFF57 // End
     case 121: return 0xFF56 // Page Down
+    // Keypad
     case 71:  return 0xFF7F // Clear / Num Lock
     case 76:  return 0xFF8D // Keypad Enter
+    case 65:  return 0xFFAE // Keypad Decimal (.)
+    case 67:  return 0xFFAA // Keypad *
+    case 69:  return 0xFFAB // Keypad +
+    case 75:  return 0xFFAF // Keypad /
+    case 78:  return 0xFFAD // Keypad -
+    case 81:  return 0xFFBD // Keypad =
+    case 82:  return 0xFFB0 // Keypad 0
+    case 83:  return 0xFFB1 // Keypad 1
+    case 84:  return 0xFFB2 // Keypad 2
+    case 85:  return 0xFFB3 // Keypad 3
+    case 86:  return 0xFFB4 // Keypad 4
+    case 87:  return 0xFFB5 // Keypad 5
+    case 88:  return 0xFFB6 // Keypad 6
+    case 89:  return 0xFFB7 // Keypad 7
+    case 91:  return 0xFFB8 // Keypad 8
+    case 92:  return 0xFFB9 // Keypad 9
+    // Function keys F1–F12
     case 122: return 0xFFBE // F1
     case 120: return 0xFFBF // F2
     case 99:  return 0xFFC0 // F3
@@ -550,6 +575,15 @@ private func specialKeysym(_ keyCode: UInt16) -> UInt32? {
     case 109: return 0xFFC7 // F10
     case 103: return 0xFFC8 // F11
     case 111: return 0xFFC9 // F12
+    // Function keys F13–F20 (extended keyboard)
+    case 105: return 0xFFCA // F13
+    case 107: return 0xFFCB // F14
+    case 113: return 0xFFCC // F15
+    case 106: return 0xFFCD // F16
+    case 64:  return 0xFFCE // F17
+    case 79:  return 0xFFCF // F18
+    case 80:  return 0xFFD0 // F19
+    case 90:  return 0xFFD1 // F20
     default:  return nil
     }
 }
