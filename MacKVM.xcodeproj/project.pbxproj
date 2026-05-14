@@ -6,10 +6,6 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		F6F793212FB5512100CB70D4 /* VNCProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6F793202FB5512100CB70D4 /* VNCProfile.swift */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXContainerItemProxy section */
 		F6073F512FB50FF300C67A5B /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -31,7 +27,6 @@
 		F6073F412FB50FF200C67A5B /* MacKVM.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MacKVM.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		F6073F502FB50FF300C67A5B /* MacKVMTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MacKVMTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F6073F5A2FB50FF300C67A5B /* MacKVMUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MacKVMUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		F6F793202FB5512100CB70D4 /* VNCProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VNCProfile.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -84,7 +79,6 @@
 				F6073F532FB50FF300C67A5B /* MacKVMTests */,
 				F6073F5D2FB50FF300C67A5B /* MacKVMUITests */,
 				F6073F422FB50FF200C67A5B /* Products */,
-				F6F793202FB5512100CB70D4 /* VNCProfile.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -242,7 +236,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F6F793212FB5512100CB70D4 /* VNCProfile.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
