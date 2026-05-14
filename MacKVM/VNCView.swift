@@ -7,6 +7,7 @@ struct ProfileEditView: View {
     var isNew: Bool
     var onSave: (VNCProfile) -> Void
     var onCancel: () -> Void
+    var onDelete: (() -> Void)? = nil   // nil when creating a new profile
 
     var body: some View {
         NavigationStack {
@@ -27,8 +28,23 @@ struct ProfileEditView: View {
 #endif
                     SecureField("Password", text: $profile.password)
                 }
+
+                // Delete button — only shown for existing profiles
+                if let onDelete {
+                    Section {
+                        Button(role: .destructive) {
+                            onDelete()
+                        } label: {
+                            HStack {
+                                Spacer()
+                                Text("Delete Profile")
+                                Spacer()
+                            }
+                        }
+                    }
+                }
             }
-            .navigationTitle(isNew ? "New Profile" : "Edit Profile")
+            .navigationTitle(isNew ? "New Profile" : "Settings")
 #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
 #endif
@@ -43,7 +59,7 @@ struct ProfileEditView: View {
             }
         }
 #if os(macOS)
-        .frame(width: 340, height: 280)
+        .frame(width: 340, height: isNew ? 280 : 320)
 #endif
     }
 }
@@ -109,9 +125,6 @@ struct VNCView: View {
     @State private var editingProfile: VNCProfile? = nil
     @State private var isNewProfile: Bool = false
 
-    // Context-menu target on macOS (right-click) / long-press on iOS
-    @State private var contextProfile: VNCProfile? = nil
-
     private var showToolbar: Bool {
         toolbarPinned || !client.isConnected || client.errorMessage != nil
     }
@@ -136,7 +149,11 @@ struct VNCView: View {
                     if isNewProfile { store.add(saved) } else { store.update(saved) }
                     editingProfile = nil
                 },
-                onCancel: { editingProfile = nil }
+                onCancel: { editingProfile = nil },
+                onDelete: isNewProfile ? nil : {
+                    store.delete(profile)
+                    editingProfile = nil
+                }
             )
         }
         .task {
@@ -165,10 +182,18 @@ struct VNCView: View {
                             isConnected: isConn,
                             isActive: isActive,
                             onTap: { handleTap(profile) },
-                            onLongPress: { contextProfile = profile }
+                            onLongPress: {
+                                isNewProfile = false
+                                editingProfile = profile
+                            }
                         )
 #if os(macOS)
-                        .contextMenu { profileContextMenu(profile) }
+                        .contextMenu {
+                            Button("Settings…") {
+                                isNewProfile = false
+                                editingProfile = profile
+                            }
+                        }
 #endif
                     }
 
@@ -210,37 +235,6 @@ struct VNCView: View {
             .padding(.trailing, 10)
         }
         .padding(.vertical, 4)
-        // iOS: show context action sheet for long-pressed profile
-#if os(iOS)
-        .confirmationDialog(
-            contextProfile.map { "Profile: \($0.chipLabel)" } ?? "",
-            isPresented: Binding(get: { contextProfile != nil }, set: { if !$0 { contextProfile = nil } }),
-            titleVisibility: .visible
-        ) {
-            if let p = contextProfile {
-                Button("Edit") {
-                    isNewProfile = false
-                    editingProfile = p
-                }
-                Button("Delete", role: .destructive) {
-                    store.delete(p)
-                }
-                Button("Cancel", role: .cancel) {}
-            }
-        }
-#endif
-    }
-
-    @ViewBuilder
-    private func profileContextMenu(_ profile: VNCProfile) -> some View {
-        Button("Edit") {
-            isNewProfile = false
-            editingProfile = profile
-        }
-        Divider()
-        Button("Delete", role: .destructive) {
-            store.delete(profile)
-        }
     }
 
     private func handleTap(_ profile: VNCProfile) {
@@ -305,21 +299,24 @@ private struct ProfileEditSheet: View {
     let isNew: Bool
     let onSave: (VNCProfile) -> Void
     let onCancel: () -> Void
+    let onDelete: (() -> Void)?
 
     @State private var draft: VNCProfile
 
     init(initial: VNCProfile, isNew: Bool,
          onSave: @escaping (VNCProfile) -> Void,
-         onCancel: @escaping () -> Void) {
-        self.initial  = initial
-        self.isNew    = isNew
-        self.onSave   = onSave
-        self.onCancel = onCancel
+         onCancel: @escaping () -> Void,
+         onDelete: (() -> Void)? = nil) {
+        self.initial   = initial
+        self.isNew     = isNew
+        self.onSave    = onSave
+        self.onCancel  = onCancel
+        self.onDelete  = onDelete
         _draft = State(initialValue: initial)
     }
 
     var body: some View {
-        ProfileEditView(profile: $draft, isNew: isNew, onSave: onSave, onCancel: onCancel)
+        ProfileEditView(profile: $draft, isNew: isNew, onSave: onSave, onCancel: onCancel, onDelete: onDelete)
     }
 }
 
