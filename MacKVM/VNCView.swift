@@ -648,6 +648,7 @@ final class VNCUIView: UIView {
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
             guard let key = press.key else { continue }
+            if handleCmdShortcut(key: key) { continue }
             if let keysym = uiKeyToKeysym(key) {
                 Task { @MainActor in self.client?.sendKeyEvent(keysym: keysym, down: true) }
             } else {
@@ -659,6 +660,8 @@ final class VNCUIView: UIView {
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         for press in presses {
             guard let key = press.key else { continue }
+            // Suppress Cmd+key releases that we already intercepted
+            if key.modifierFlags.contains(.command) { continue }
             if let keysym = uiKeyToKeysym(key) {
                 Task { @MainActor in self.client?.sendKeyEvent(keysym: keysym, down: false) }
             } else {
@@ -669,6 +672,70 @@ final class VNCUIView: UIView {
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         pressesEnded(presses, with: event)
+    }
+
+    // MARK: Cmd shortcut interception (iPad hardware keyboard)
+    //
+    // Matches the macOS semantics in VNCNSView.handleCmdShortcut:
+    //   Cmd+C → copy remote clipboard (ServerCutText) to iOS pasteboard
+    //   Cmd+V → middle-click at current pointer (X11 primary selection paste)
+    //   Cmd+T → type iOS pasteboard text as keystrokes into remote
+    //   Other Cmd+key → forward as Ctrl+key
+
+    @discardableResult
+    private func handleCmdShortcut(key: UIKey) -> Bool {
+        guard key.modifierFlags.contains(.command) else { return false }
+        let chars = key.charactersIgnoringModifiers.lowercased()
+        switch chars {
+        case "c":
+            // Copy remote clipboard → iOS pasteboard
+            if let text = client?.remoteClipboard, !text.isEmpty {
+                UIPasteboard.general.string = text
+            }
+            return true
+        case "v":
+            // Middle-click at current remote pointer (X11 primary selection paste)
+            let (px, py) = (lastPointerX, lastPointerY)
+            Task { @MainActor in
+                self.client?.sendPointerEvent(x: px, y: py, buttonMask: 2)
+                self.client?.sendPointerEvent(x: px, y: py, buttonMask: 0)
+            }
+            return true
+        case "t":
+            // Type iOS pasteboard text as keystrokes into remote
+            Task { @MainActor in self.typeHostClipboard() }
+            return true
+        default:
+            // Forward other Cmd+key as Ctrl+key
+            if let keysym = uiKeyToKeysym(key) {
+                Task { @MainActor in
+                    self.client?.sendKeyEvent(keysym: 0xFFE3, down: true)   // Ctrl down
+                    self.client?.sendKeyEvent(keysym: keysym, down: true)
+                    self.client?.sendKeyEvent(keysym: keysym, down: false)
+                    self.client?.sendKeyEvent(keysym: 0xFFE3, down: false)  // Ctrl up
+                }
+            }
+            return true
+        }
+    }
+
+    private func typeHostClipboard() {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
+        for scalar in text.unicodeScalars {
+            let v = scalar.value
+            let keysym: UInt32
+            if v == 0x0A || v == 0x0D {
+                keysym = 0xFF0D // Return
+            } else if v >= 0x20 && v <= 0xFF {
+                keysym = v
+            } else if v > 0xFF {
+                keysym = 0x01000000 | v
+            } else {
+                continue
+            }
+            client?.sendKeyEvent(keysym: keysym, down: true)
+            client?.sendKeyEvent(keysym: keysym, down: false)
+        }
     }
 
     // MARK: Touch → RFB pointer (finger touch on screen)
