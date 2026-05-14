@@ -13,9 +13,16 @@ struct VNCView: View {
     @State private var port     = defaultPort
     @State private var password = defaultPassword
 
+    /// When true the toolbar stays visible even while connected.
+    @State private var toolbarPinned: Bool = true
+
+    private var showToolbar: Bool {
+        toolbarPinned || !client.isConnected || client.errorMessage != nil
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            if !client.isConnected || client.errorMessage != nil {
+            if showToolbar {
                 toolbar
                 Divider()
             }
@@ -64,6 +71,16 @@ struct VNCView: View {
             }
 
             connectButton
+
+            // Pin button — keeps the toolbar visible while connected
+            Button {
+                toolbarPinned.toggle()
+            } label: {
+                Image(systemName: toolbarPinned ? "pin.fill" : "pin.slash")
+                    .foregroundColor(toolbarPinned ? .accentColor : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .help(toolbarPinned ? "Unpin toolbar (hide when connected)" : "Pin toolbar (keep visible when connected)")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -93,7 +110,10 @@ struct VNCView: View {
     @ViewBuilder
     private var content: some View {
         if let image = client.image {
-            FramebufferView(cgImage: image, client: client)
+            FramebufferView(cgImage: image, client: client, onDoubleTap: {
+                client.disconnect()
+                toolbarPinned = true
+            })
         } else if client.isConnected {
             ProgressView("Waiting for framebuffer…")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -128,16 +148,19 @@ struct VNCView: View {
 struct FramebufferView: NSViewRepresentable {
     let cgImage: CGImage
     let client: VNCClient
+    var onDoubleTap: () -> Void = {}
 
     func makeNSView(context: Context) -> VNCNSView {
         let v = VNCNSView()
         v.client = client
+        v.onDoubleTap = onDoubleTap
         return v
     }
 
     func updateNSView(_ nsView: VNCNSView, context: Context) {
         nsView.cgImage = cgImage
         nsView.client = client
+        nsView.onDoubleTap = onDoubleTap
         nsView.needsDisplay = true
     }
 }
@@ -148,6 +171,7 @@ final class VNCNSView: NSView {
 
     var cgImage: CGImage?
     weak var client: VNCClient?
+    var onDoubleTap: () -> Void = {}
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -295,7 +319,7 @@ final class VNCNSView: NSView {
     // MARK: Mouse
 
     override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 { Task { @MainActor in client?.disconnect() }; return }
+        if event.clickCount == 2 { Task { @MainActor in onDoubleTap() }; return }
         sendPointer(event: event, mask: 1)
     }
     override func mouseUp(with event: NSEvent)        { if event.clickCount < 2 { sendPointer(event: event, mask: 0) } }
@@ -359,10 +383,12 @@ final class VNCNSView: NSView {
 struct FramebufferView: UIViewRepresentable {
     let cgImage: CGImage
     let client: VNCClient
+    var onDoubleTap: () -> Void = {}
 
     func makeUIView(context: Context) -> VNCUIView {
         let v = VNCUIView()
         v.client = client
+        v.onDoubleTap = onDoubleTap
         wireHover(v)
         return v
     }
@@ -370,6 +396,7 @@ struct FramebufferView: UIViewRepresentable {
     func updateUIView(_ uiView: VNCUIView, context: Context) {
         uiView.cgImage = cgImage
         uiView.client = client
+        uiView.onDoubleTap = onDoubleTap
         uiView.setNeedsDisplay()
     }
 }
@@ -380,6 +407,7 @@ final class VNCUIView: UIView {
 
     var cgImage: CGImage?
     weak var client: VNCClient?
+    var onDoubleTap: () -> Void = {}
 
     // Last known pointer position (for scroll events that don't carry location)
     private var lastPointerX: Int = 0
@@ -489,7 +517,7 @@ final class VNCUIView: UIView {
     }
 
     @objc private func handleDoubleTap() {
-        Task { @MainActor in client?.disconnect() }
+        Task { @MainActor in onDoubleTap() }
     }
 
     // MARK: Scroll (two-finger trackpad scroll or mouse wheel)
