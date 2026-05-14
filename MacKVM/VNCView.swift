@@ -177,6 +177,41 @@ final class VNCNSView: NSView {
         Task { @MainActor in client?.sendKeyEvent(keysym: keysym, down: down) }
     }
 
+    // MARK: Modifier keys (Ctrl, Shift, Alt, Cmd, Fn)
+    // On macOS, modifier keys do not generate keyDown/keyUp events — they
+    // arrive only via flagsChanged. We track the previous flags so we can
+    // distinguish press (bit newly set) from release (bit newly cleared).
+
+    private var lastModifierFlags: NSEvent.ModifierFlags = []
+
+    override func flagsChanged(with event: NSEvent) {
+        let current  = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let previous = lastModifierFlags
+        lastModifierFlags = current
+
+        // Each modifier maps to one or two keysyms (left/right variants).
+        // We use the generic (left) keysym because macOS doesn't distinguish
+        // sides via flagsChanged alone.
+        let modifierMap: [(NSEvent.ModifierFlags, UInt32)] = [
+            (.shift,   0xFFE1), // Left Shift
+            (.control, 0xFFE3), // Left Ctrl
+            (.option,  0xFFE9), // Left Alt
+            (.command, 0xFFE3), // Left Cmd → Ctrl on the remote (KVM convention)
+            (.capsLock,0xFFE5), // Caps Lock
+            (.function,0xFFEB), // Fn → Super
+        ]
+
+        for (flag, keysym) in modifierMap {
+            let wasDown = previous.contains(flag)
+            let isDown  = current.contains(flag)
+            if isDown && !wasDown {
+                Task { @MainActor in self.client?.sendKeyEvent(keysym: keysym, down: true) }
+            } else if !isDown && wasDown {
+                Task { @MainActor in self.client?.sendKeyEvent(keysym: keysym, down: false) }
+            }
+        }
+    }
+
     // MARK: Mouse
 
     override func mouseDown(with event: NSEvent) {
