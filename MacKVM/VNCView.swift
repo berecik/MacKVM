@@ -75,39 +75,49 @@ struct ProfileChip: View {
     let onLongPress: () -> Void
 
     var body: some View {
-        Button(action: onTap) {
-            VStack(spacing: 2) {
-                // Connection state icon
-                Image(systemName: isConnected ? "stop.circle.fill" : "play.circle")
-                    .font(.system(size: 18, weight: isActive ? .bold : .regular))
-                    .foregroundColor(isConnected ? .red : (isActive ? .accentColor : .secondary))
-
-                Text(profile.chipLabel)
-                    .font(.system(size: 10, weight: isActive ? .bold : .regular))
-                    .lineLimit(1)
-                    .foregroundColor(isActive ? .primary : .secondary)
-
-                Text(profile.port)
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-            }
-            .frame(width: 64)
-            .padding(.vertical, 4)
-            .padding(.horizontal, 2)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(isActive ? Color.accentColor.opacity(0.12) : Color.clear)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(isConnected ? Color.red.opacity(0.4) : Color.clear, lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
+        chipContent
 #if os(iOS)
-        .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in onLongPress() })
+            .onTapGesture { onTap() }
+            .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in onLongPress() })
+#else
+            // On macOS use a plain tap gesture so right-click is NOT consumed by
+            // Button and can reach the .contextMenu modifier reliably.
+            .onTapGesture { onTap() }
+            .contextMenu {
+                Button("Settings…") { onLongPress() }
+            }
 #endif
-        .help("\(profile.host):\(profile.port)")
+            .help("\(profile.host):\(profile.port)")
+    }
+
+    private var chipContent: some View {
+        VStack(spacing: 2) {
+            // Connection state icon
+            Image(systemName: isConnected ? "stop.circle.fill" : "play.circle")
+                .font(.system(size: 18, weight: isActive ? .bold : .regular))
+                .foregroundColor(isConnected ? .red : (isActive ? .accentColor : .secondary))
+
+            Text(profile.chipLabel)
+                .font(.system(size: 10, weight: isActive ? .bold : .regular))
+                .lineLimit(1)
+                .foregroundColor(isActive ? .primary : .secondary)
+
+            Text(profile.port)
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+        }
+        .frame(width: 64)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 2)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isActive ? Color.accentColor.opacity(0.12) : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isConnected ? Color.red.opacity(0.4) : Color.clear, lineWidth: 1)
+        )
+        .contentShape(Rectangle())  // make entire frame tappable
     }
 }
 
@@ -187,14 +197,6 @@ struct VNCView: View {
                                 editingProfile = profile
                             }
                         )
-#if os(macOS)
-                        .contextMenu {
-                            Button("Settings…") {
-                                isNewProfile = false
-                                editingProfile = profile
-                            }
-                        }
-#endif
                     }
 
                     // "Add profile" button
@@ -259,7 +261,9 @@ struct VNCView: View {
     @ViewBuilder
     private var content: some View {
         if let image = client.image {
-            FramebufferView(cgImage: image, client: client, onDoubleTap: {
+            FramebufferView(cgImage: image, client: client,
+                            toolbarVisible: showToolbar,
+                            onDoubleTap: {
                 client.disconnect()
                 toolbarPinned = true
             })
@@ -327,11 +331,13 @@ private struct ProfileEditSheet: View {
 struct FramebufferView: NSViewRepresentable {
     let cgImage: CGImage
     let client: VNCClient
+    var toolbarVisible: Bool = false
     var onDoubleTap: () -> Void = {}
 
     func makeNSView(context: Context) -> VNCNSView {
         let v = VNCNSView()
         v.client = client
+        v.toolbarVisible = toolbarVisible
         v.onDoubleTap = onDoubleTap
         return v
     }
@@ -339,6 +345,7 @@ struct FramebufferView: NSViewRepresentable {
     func updateNSView(_ nsView: VNCNSView, context: Context) {
         nsView.cgImage = cgImage
         nsView.client = client
+        nsView.toolbarVisible = toolbarVisible
         nsView.onDoubleTap = onDoubleTap
         nsView.needsDisplay = true
     }
@@ -350,6 +357,7 @@ final class VNCNSView: NSView {
 
     var cgImage: CGImage?
     weak var client: VNCClient?
+    var toolbarVisible: Bool = false
     var onDoubleTap: () -> Void = {}
 
     override var acceptsFirstResponder: Bool { true }
@@ -498,10 +506,20 @@ final class VNCNSView: NSView {
     // MARK: Mouse
 
     override func mouseDown(with event: NSEvent) {
-        if event.clickCount == 2 { Task { @MainActor in onDoubleTap() }; return }
+        // Double-click when toolbar is hidden → show toolbar (escape gesture).
+        // Double-click when toolbar is visible → proxy to remote as two left-clicks.
+        if event.clickCount == 2 && !toolbarVisible {
+            Task { @MainActor in onDoubleTap() }
+            return
+        }
         sendPointer(event: event, mask: 1)
     }
-    override func mouseUp(with event: NSEvent)        { if event.clickCount < 2 { sendPointer(event: event, mask: 0) } }
+    override func mouseUp(with event: NSEvent) {
+        // On click-count == 2 with toolbar hidden we consumed the event above;
+        // suppress the paired mouseUp so the remote doesn't get a dangling release.
+        if event.clickCount == 2 && !toolbarVisible { return }
+        sendPointer(event: event, mask: 0)
+    }
     override func mouseDragged(with event: NSEvent)   { sendPointer(event: event, mask: 1) }
     override func rightMouseDown(with event: NSEvent) { sendPointer(event: event, mask: 4) }
     override func rightMouseUp(with event: NSEvent)   { sendPointer(event: event, mask: 0) }
@@ -562,11 +580,13 @@ final class VNCNSView: NSView {
 struct FramebufferView: UIViewRepresentable {
     let cgImage: CGImage
     let client: VNCClient
+    var toolbarVisible: Bool = false
     var onDoubleTap: () -> Void = {}
 
     func makeUIView(context: Context) -> VNCUIView {
         let v = VNCUIView()
         v.client = client
+        v.toolbarVisible = toolbarVisible
         v.onDoubleTap = onDoubleTap
         wireHover(v)
         return v
@@ -575,6 +595,7 @@ struct FramebufferView: UIViewRepresentable {
     func updateUIView(_ uiView: VNCUIView, context: Context) {
         uiView.cgImage = cgImage
         uiView.client = client
+        uiView.toolbarVisible = toolbarVisible
         uiView.onDoubleTap = onDoubleTap
         uiView.setNeedsDisplay()
     }
@@ -586,6 +607,7 @@ final class VNCUIView: UIView {
 
     var cgImage: CGImage?
     weak var client: VNCClient?
+    var toolbarVisible: Bool = false
     var onDoubleTap: () -> Void = {}
 
     // Last known pointer position (for scroll events that don't carry location)
@@ -597,8 +619,8 @@ final class VNCUIView: UIView {
         backgroundColor = .black
         isMultipleTouchEnabled = false
 
-        // Double-tap to disconnect and reveal toolbar
-        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap))
+        // Double-tap: intercept only when toolbar is hidden (escape gesture)
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         addGestureRecognizer(doubleTap)
 
@@ -762,7 +784,19 @@ final class VNCUIView: UIView {
         sendPointer(at: t.location(in: self), mask: 0)
     }
 
-    @objc private func handleDoubleTap() {
+    @objc private func handleDoubleTap(_ gr: UITapGestureRecognizer) {
+        // Only intercept double-tap when toolbar is hidden (escape gesture).
+        // When toolbar is visible, let touches fall through to the normal
+        // touchesBegan/Ended path which proxies them to the remote.
+        guard !toolbarVisible else {
+            // Re-send as two pointer clicks so the remote sees the double-click.
+            let loc = gr.location(in: self)
+            sendPointer(at: loc, mask: 1)
+            sendPointer(at: loc, mask: 0)
+            sendPointer(at: loc, mask: 1)
+            sendPointer(at: loc, mask: 0)
+            return
+        }
         Task { @MainActor in onDoubleTap() }
     }
 
