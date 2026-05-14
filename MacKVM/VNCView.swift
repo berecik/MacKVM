@@ -760,18 +760,34 @@ final class VNCUIView: UIView {
         }
     }
 
-    // MARK: Touch → RFB pointer (finger touch on screen)
+    // MARK: Touch → RFB pointer (finger touch on screen, or indirect pointer from mouse/trackpad)
+    //
+    // With UIApplicationSupportsIndirectInputEvents=YES (set in this project's pbxproj),
+    // mouse/trackpad clicks arrive as UITouch of type .indirectPointer.
+    // event.buttonMask tells us which physical button was pressed:
+    //   .primary   → left button   (RFB mask 1)
+    //   .secondary → right button  (RFB mask 4)
+    //   neither    → middle button (RFB mask 2)
+    // Finger touches produce no buttonMask; treat them as left button.
+
+    private func rfbMask(from event: UIEvent?, down: Bool) -> Int {
+        guard down else { return 0 }
+        guard let mask = event?.buttonMask else { return 1 }
+        if mask.contains(.secondary) { return 4 }
+        if mask.contains(.primary)   { return 1 }
+        // Neither primary nor secondary set → treat as middle button
+        return 2
+    }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         becomeFirstResponder()
         guard let t = touches.first else { return }
-        // Ignore if this came from the double-tap recogniser
-        sendPointer(at: t.location(in: self), mask: 1)
+        sendPointer(at: t.location(in: self), mask: rfbMask(from: event, down: true))
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let t = touches.first else { return }
-        sendPointer(at: t.location(in: self), mask: 1)
+        sendPointer(at: t.location(in: self), mask: rfbMask(from: event, down: true))
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
