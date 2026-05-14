@@ -167,16 +167,6 @@ final class VNCNSView: NSView {
         ctx.draw(img, in: CGRect(x: ox, y: oy, width: dw, height: dh))
     }
 
-    // MARK: Keyboard
-
-    override func keyDown(with event: NSEvent) { sendKey(event: event, down: true) }
-    override func keyUp(with event: NSEvent)   { sendKey(event: event, down: false) }
-
-    private func sendKey(event: NSEvent, down: Bool) {
-        guard let keysym = x11Keysym(for: event) else { return }
-        Task { @MainActor in client?.sendKeyEvent(keysym: keysym, down: down) }
-    }
-
     // MARK: Modifier keys (Ctrl, Shift, Alt, Cmd, Fn)
     // On macOS, modifier keys do not generate keyDown/keyUp events — they
     // arrive only via flagsChanged. We track the previous flags so we can
@@ -189,14 +179,13 @@ final class VNCNSView: NSView {
         let previous = lastModifierFlags
         lastModifierFlags = current
 
-        // Each modifier maps to one or two keysyms (left/right variants).
-        // We use the generic (left) keysym because macOS doesn't distinguish
-        // sides via flagsChanged alone.
+        // Each modifier maps to one keysym. Cmd is mapped to Ctrl (KVM convention).
+        // Cmd is intentionally excluded here so Cmd+C / Cmd+V can be intercepted
+        // in keyDown without also sending a spurious Ctrl-down to the remote.
         let modifierMap: [(NSEvent.ModifierFlags, UInt32)] = [
             (.shift,   0xFFE1), // Left Shift
             (.control, 0xFFE3), // Left Ctrl
             (.option,  0xFFE9), // Left Alt
-            (.command, 0xFFE3), // Left Cmd → Ctrl on the remote (KVM convention)
             (.capsLock,0xFFE5), // Caps Lock
             (.function,0xFFEB), // Fn → Super
         ]
@@ -212,6 +201,97 @@ final class VNCNSView: NSView {
         }
     }
 
+    // MARK: Host clipboard integration & Cmd shortcuts
+    //
+    // Cmd+C  → copy the remote's clipboard (ServerCutText) to the host pasteboard.
+    //          X11 apps send ServerCutText when text is selected; pressing Cmd+C
+    //          here captures whatever the remote last sent and puts it on macOS.
+    // Cmd+V  → middle-click at the current pointer position.
+    //          On X11, selecting text populates the primary selection buffer, and
+    //          middle-click pastes from it. Pressing Cmd+V middle-clicks the remote
+    //          so you can paste from the primary selection without a physical wheel.
+    // Cmd+T  → type the macOS clipboard into the remote as keystrokes.
+    //          Lets you compose text on the Mac and send it to the remote terminal.
+    // Other Cmd+key → forward as Ctrl+key (standard KVM convention).
+
+    // Last known pointer position in VNC framebuffer coordinates (for middle-click).
+    private var lastPointerVNCPos: (x: Int, y: Int) = (0, 0)
+
+    private func handleCmdShortcut(event: NSEvent) -> Bool {
+        guard event.modifierFlags.contains(.command),
+              let chars = event.charactersIgnoringModifiers else { return false }
+
+        switch chars.lowercased() {
+        case "c":
+            // Copy remote clipboard → host pasteboard
+            if let text = client?.remoteClipboard, !text.isEmpty {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+            return true
+        case "v":
+            // Middle-click at the current remote pointer position (X11 primary selection paste)
+            let (px, py) = lastPointerVNCPos
+            Task { @MainActor in
+                self.client?.sendPointerEvent(x: px, y: py, buttonMask: 2)
+                self.client?.sendPointerEvent(x: px, y: py, buttonMask: 0)
+            }
+            return true
+        case "t":
+            // Type host clipboard text as keystrokes into the remote
+            Task { @MainActor in self.typeHostClipboard() }
+            return true
+        default:
+            // Forward other Cmd+key as Ctrl+key
+            Task { @MainActor in
+                self.client?.sendKeyEvent(keysym: 0xFFE3, down: true)   // Ctrl down
+                if let keysym = x11Keysym(for: event) {
+                    self.client?.sendKeyEvent(keysym: keysym, down: true)
+                    self.client?.sendKeyEvent(keysym: keysym, down: false)
+                }
+                self.client?.sendKeyEvent(keysym: 0xFFE3, down: false)  // Ctrl up
+            }
+            return true
+        }
+    }
+
+    private func typeHostClipboard() {
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
+        // Send each Unicode scalar as a keysym.
+        for scalar in text.unicodeScalars {
+            let v = scalar.value
+            let keysym: UInt32
+            if v == 0x0A || v == 0x0D {
+                keysym = 0xFF0D // Return
+            } else if v >= 0x20 && v <= 0xFF {
+                keysym = v
+            } else if v > 0xFF {
+                keysym = 0x01000000 | v
+            } else {
+                continue
+            }
+            client?.sendKeyEvent(keysym: keysym, down: true)
+            client?.sendKeyEvent(keysym: keysym, down: false)
+        }
+    }
+
+    // MARK: Keyboard
+
+    override func keyDown(with event: NSEvent) {
+        if handleCmdShortcut(event: event) { return }
+        sendKey(event: event, down: true)
+    }
+    override func keyUp(with event: NSEvent) {
+        // Don't forward Cmd+key releases — handled in handleCmdShortcut
+        if event.modifierFlags.contains(.command) { return }
+        sendKey(event: event, down: false)
+    }
+
+    private func sendKey(event: NSEvent, down: Bool) {
+        guard let keysym = x11Keysym(for: event) else { return }
+        Task { @MainActor in client?.sendKeyEvent(keysym: keysym, down: down) }
+    }
+
     // MARK: Mouse
 
     override func mouseDown(with event: NSEvent) {
@@ -223,6 +303,17 @@ final class VNCNSView: NSView {
     override func rightMouseDown(with event: NSEvent) { sendPointer(event: event, mask: 4) }
     override func rightMouseUp(with event: NSEvent)   { sendPointer(event: event, mask: 0) }
     override func mouseMoved(with event: NSEvent)     { sendPointer(event: event, mask: 0) }
+
+    // Middle mouse button (wheel-click) = RFB button mask bit 1 (value 2)
+    override func otherMouseDown(with event: NSEvent) {
+        if event.buttonNumber == 2 { sendPointer(event: event, mask: 2) }
+    }
+    override func otherMouseUp(with event: NSEvent) {
+        if event.buttonNumber == 2 { sendPointer(event: event, mask: 0) }
+    }
+    override func otherMouseDragged(with event: NSEvent) {
+        if event.buttonNumber == 2 { sendPointer(event: event, mask: 2) }
+    }
 
     override func scrollWheel(with event: NSEvent) {
         let dy = event.scrollingDeltaY
@@ -245,6 +336,7 @@ final class VNCNSView: NSView {
         let ny = imgH - (loc.y - oy) / scale   // flip: NSView bottom-left, VNC top-left
         let x = max(0, min(Int(nx), img.width  - 1))
         let y = max(0, min(Int(ny), img.height - 1))
+        lastPointerVNCPos = (x, y)
         Task { @MainActor in client.sendPointerEvent(x: x, y: y, buttonMask: mask) }
     }
 

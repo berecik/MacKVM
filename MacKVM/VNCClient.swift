@@ -9,6 +9,8 @@ final class VNCClient: ObservableObject {
     @Published var image: CGImage?
     @Published var isConnected: Bool = false
     @Published var errorMessage: String?
+    /// Latest text received from the remote via ServerCutText (RFB clipboard).
+    @Published var remoteClipboard: String = ""
 
     private var handle: OpaquePointer? // VNCClientHandle *
 
@@ -54,6 +56,15 @@ final class VNCClient: ObservableObject {
             guard let ctx else { return }
             Task { @MainActor in
                 VNCClient.handleError(context: ctx, message: msg)
+            }
+        }, Unmanaged.passUnretained(self).toOpaque())
+
+        // ServerCutText callback — remote clipboard text arriving from the server.
+        vncclient_set_cut_text_callback(h, { textPtr, _, ctx in
+            guard let textPtr, let ctx else { return }
+            let text = String(cString: textPtr)
+            Task { @MainActor in
+                VNCClient.handleCutText(context: ctx, text: text)
             }
         }, Unmanaged.passUnretained(self).toOpaque())
 
@@ -111,6 +122,11 @@ final class VNCClient: ObservableObject {
         client.isConnected = false
         // Don't call vncclient_disconnect here — C side already closed the socket.
         client.handle = nil
+    }
+
+    private static func handleCutText(context: UnsafeMutableRawPointer, text: String) {
+        let client = Unmanaged<VNCClient>.fromOpaque(context).takeUnretainedValue()
+        client.remoteClipboard = text
     }
 
     // MARK: - CGImage construction from BGRA data

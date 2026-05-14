@@ -20,6 +20,9 @@ typedef void (*VNCFramebufferCallback)(const unsigned char * _Nullable pixels,
 // Called when the connection is lost or an error occurs.
 typedef void (*VNCErrorCallback)(const char * _Nullable message, void * _Nullable userdata);
 
+// Called when the server sends clipboard text (ServerCutText message).
+typedef void (*VNCCutTextCallback)(const char * _Nullable text, uint32_t length, void * _Nullable userdata);
+
 // Creates a new VNC client instance. Returns NULL on allocation failure.
 VNCClientHandle * _Nullable vncclient_create(void);
 
@@ -35,6 +38,11 @@ void vncclient_set_framebuffer_callback(VNCClientHandle * _Nullable client,
 void vncclient_set_error_callback(VNCClientHandle * _Nullable client,
                                   VNCErrorCallback _Nullable callback,
                                   void * _Nullable userdata);
+
+// Sets the ServerCutText (remote clipboard) callback.
+void vncclient_set_cut_text_callback(VNCClientHandle * _Nullable client,
+                                     VNCCutTextCallback _Nullable callback,
+                                     void * _Nullable userdata);
 
 // Connects to host:port, performs RFB handshake, and starts the receive
 // loop on a background thread. Returns 0 on successful handshake,

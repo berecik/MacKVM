@@ -86,6 +86,9 @@ struct VNCClientHandle {
     VNCErrorCallback err_callback;
     void *err_userdata;
 
+    VNCCutTextCallback cut_text_callback;
+    void *cut_text_userdata;
+
     volatile int running;
     pthread_t recv_thread;
 };
@@ -144,6 +147,14 @@ void vncclient_set_error_callback(VNCClientHandle *client,
     if (!client) return;
     client->err_callback = callback;
     client->err_userdata = userdata;
+}
+
+void vncclient_set_cut_text_callback(VNCClientHandle *client,
+                                     VNCCutTextCallback callback,
+                                     void *userdata) {
+    if (!client) return;
+    client->cut_text_callback = callback;
+    client->cut_text_userdata = userdata;
 }
 
 const char *vncclient_last_error(VNCClientHandle *client) {
@@ -320,9 +331,15 @@ static void *recv_loop(void *arg) {
             uint32_t len_n;
             read_exact(c->sock, &len_n, 4);
             uint32_t len = ntohl(len_n);
-            if (len > 0 && len < 65536) {
-                char *text = (char *)malloc(len);
-                if (text) { read_exact(c->sock, text, len); free(text); }
+            if (len > 0 && len < 1048576) { // 1 MB cap
+                char *text = (char *)malloc(len + 1);
+                if (text) {
+                    read_exact(c->sock, text, len);
+                    text[len] = '\0';
+                    if (c->cut_text_callback)
+                        c->cut_text_callback(text, len, c->cut_text_userdata);
+                    free(text);
+                }
             }
         } else {
             // Unknown message — can't recover
