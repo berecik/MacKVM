@@ -1,20 +1,116 @@
 import SwiftUI
 
-// Default PiKVM connection parameters
-private let defaultHost     = "192.168.50.102"
-private let defaultPort     = "5902"
-private let defaultPassword = "berecik"
+// MARK: - Profile edit sheet
+
+struct ProfileEditView: View {
+    @Binding var profile: VNCProfile
+    var isNew: Bool
+    var onSave: (VNCProfile) -> Void
+    var onCancel: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Name") {
+                    TextField("Label (optional)", text: $profile.name)
+                }
+                Section("Connection") {
+                    TextField("Host / IP", text: $profile.host)
+#if os(iOS)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+#endif
+                    TextField("Port", text: $profile.port)
+#if os(iOS)
+                        .keyboardType(.numberPad)
+#endif
+                    SecureField("Password", text: $profile.password)
+                }
+            }
+            .navigationTitle(isNew ? "New Profile" : "Edit Profile")
+#if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+#endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { onSave(profile) }
+                        .disabled(profile.host.isEmpty || profile.port.isEmpty)
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onCancel)
+                }
+            }
+        }
+#if os(macOS)
+        .frame(width: 340, height: 280)
+#endif
+    }
+}
+
+// MARK: - Profile chip
+
+/// A single pill button representing one saved profile.
+struct ProfileChip: View {
+    let profile: VNCProfile
+    let isConnected: Bool
+    let isActive: Bool        // last-used / currently connecting
+    let onTap: () -> Void
+    let onLongPress: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(spacing: 2) {
+                // Connection state icon
+                Image(systemName: isConnected ? "stop.circle.fill" : "play.circle")
+                    .font(.system(size: 18, weight: isActive ? .bold : .regular))
+                    .foregroundColor(isConnected ? .red : (isActive ? .accentColor : .secondary))
+
+                Text(profile.chipLabel)
+                    .font(.system(size: 10, weight: isActive ? .bold : .regular))
+                    .lineLimit(1)
+                    .foregroundColor(isActive ? .primary : .secondary)
+
+                Text(profile.port)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+            .frame(width: 64)
+            .padding(.vertical, 4)
+            .padding(.horizontal, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isActive ? Color.accentColor.opacity(0.12) : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isConnected ? Color.red.opacity(0.4) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+#if os(iOS)
+        .simultaneousGesture(LongPressGesture(minimumDuration: 0.5).onEnded { _ in onLongPress() })
+#endif
+        .help("\(profile.host):\(profile.port)")
+    }
+}
+
+// MARK: - VNCView
 
 struct VNCView: View {
 
     @StateObject private var client = VNCClient()
-
-    @State private var host     = defaultHost
-    @State private var port     = defaultPort
-    @State private var password = defaultPassword
+    @StateObject private var store  = ProfileStore()
 
     /// When true the toolbar stays visible even while connected.
     @State private var toolbarPinned: Bool = true
+
+    // Profile editing
+    @State private var editingProfile: VNCProfile? = nil
+    @State private var isNewProfile: Bool = false
+
+    // Context-menu target on macOS (right-click) / long-press on iOS
+    @State private var contextProfile: VNCProfile? = nil
 
     private var showToolbar: Bool {
         toolbarPinned || !client.isConnected || client.errorMessage != nil
@@ -31,78 +127,137 @@ struct VNCView: View {
 #if os(macOS)
         .frame(minWidth: 800, minHeight: 600)
 #endif
+        .sheet(item: $editingProfile) { profile in
+            // Binding into the sheet — changes are committed only on Save
+            ProfileEditSheet(
+                initial: profile,
+                isNew: isNewProfile,
+                onSave: { saved in
+                    if isNewProfile { store.add(saved) } else { store.update(saved) }
+                    editingProfile = nil
+                },
+                onCancel: { editingProfile = nil }
+            )
+        }
         .task {
-            // Auto-connect on launch if defaults are configured
-            guard let portNum = Int(port), !host.isEmpty, !port.isEmpty else { return }
-            await client.connect(host: host, port: portNum, password: password)
+            // Auto-connect to the last-used / first profile on launch
+            if let p = store.profiles.first {
+                store.activeProfileID = p.id
+                guard let portNum = Int(p.port), !p.host.isEmpty else { return }
+                await client.connect(host: p.host, port: portNum, password: p.password)
+            }
         }
     }
 
     // MARK: - Toolbar
 
     private var toolbar: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "server.rack")
-                .foregroundColor(.secondary)
+        HStack(spacing: 4) {
+            // Profiles row
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(store.profiles) { profile in
+                        let isConn = client.isConnected && store.activeProfileID == profile.id
+                        let isActive = store.activeProfileID == profile.id
 
-            TextField("Host", text: $host)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 180)
-                .disabled(client.isConnected)
+                        ProfileChip(
+                            profile: profile,
+                            isConnected: isConn,
+                            isActive: isActive,
+                            onTap: { handleTap(profile) },
+                            onLongPress: { contextProfile = profile }
+                        )
+#if os(macOS)
+                        .contextMenu { profileContextMenu(profile) }
+#endif
+                    }
 
-            TextField("Port", text: $port)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 70)
-                .disabled(client.isConnected)
+                    // "Add profile" button
+                    Button {
+                        isNewProfile = true
+                        editingProfile = VNCProfile(name: "", host: "", port: "5902", password: "")
+                    } label: {
+                        Image(systemName: "plus.circle")
+                            .font(.system(size: 18))
+                            .foregroundColor(.secondary)
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Add profile")
+                }
+                .padding(.horizontal, 8)
+            }
 
-            SecureField("Password", text: $password)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 120)
-                .disabled(client.isConnected)
-
-            Spacer()
-
+            // Error message
             if let err = client.errorMessage {
                 Text(err)
                     .foregroundColor(.red)
+                    .font(.caption)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: 300)
+                    .frame(maxWidth: 240)
             }
 
-            connectButton
+            Spacer(minLength: 0)
 
-            // Pin button — keeps the toolbar visible while connected
-            Button {
-                toolbarPinned.toggle()
-            } label: {
+            // Pin button
+            Button { toolbarPinned.toggle() } label: {
                 Image(systemName: toolbarPinned ? "pin.fill" : "pin.slash")
                     .foregroundColor(toolbarPinned ? .accentColor : .secondary)
             }
             .buttonStyle(.borderless)
-            .help(toolbarPinned ? "Unpin toolbar (hide when connected)" : "Pin toolbar (keep visible when connected)")
+            .help(toolbarPinned ? "Unpin toolbar" : "Pin toolbar")
+            .padding(.trailing, 10)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.vertical, 4)
+        // iOS: show context action sheet for long-pressed profile
+#if os(iOS)
+        .confirmationDialog(
+            contextProfile.map { "Profile: \($0.chipLabel)" } ?? "",
+            isPresented: Binding(get: { contextProfile != nil }, set: { if !$0 { contextProfile = nil } }),
+            titleVisibility: .visible
+        ) {
+            if let p = contextProfile {
+                Button("Edit") {
+                    isNewProfile = false
+                    editingProfile = p
+                }
+                Button("Delete", role: .destructive) {
+                    store.delete(p)
+                }
+                Button("Cancel", role: .cancel) {}
+            }
+        }
+#endif
     }
 
-    private var connectButton: some View {
-        Button {
-            if client.isConnected {
-                client.disconnect()
-            } else {
-                guard let portNum = Int(port) else { return }
-                Task {
-                    await client.connect(host: host, port: portNum, password: password)
-                }
-            }
-        } label: {
-            Label(client.isConnected ? "Disconnect" : "Connect",
-                  systemImage: client.isConnected ? "stop.circle" : "play.circle")
+    @ViewBuilder
+    private func profileContextMenu(_ profile: VNCProfile) -> some View {
+        Button("Edit") {
+            isNewProfile = false
+            editingProfile = profile
         }
-        .buttonStyle(.borderedProminent)
-        .tint(client.isConnected ? .red : .blue)
-        .disabled(!client.isConnected && (host.isEmpty || port.isEmpty))
+        Divider()
+        Button("Delete", role: .destructive) {
+            store.delete(profile)
+        }
+    }
+
+    private func handleTap(_ profile: VNCProfile) {
+        let isConn = client.isConnected && store.activeProfileID == profile.id
+        if isConn {
+            client.disconnect()
+        } else {
+            if client.isConnected { client.disconnect() }
+            store.activeProfileID = profile.id
+            guard let portNum = Int(profile.port), !profile.host.isEmpty else { return }
+            Task {
+                await client.connect(host: profile.host, port: portNum, password: profile.password)
+                // Mark last connected timestamp
+                store.touch(host: profile.host, port: profile.port,
+                            password: profile.password, name: profile.name)
+            }
+        }
     }
 
     // MARK: - Main content area
@@ -128,16 +283,43 @@ struct VNCView: View {
                     Image(systemName: "display")
                         .font(.system(size: 72))
                         .foregroundColor(.secondary)
-                    Text("PiKVM")
-                        .font(.title)
-                        .foregroundColor(.primary)
-                    Text("\(host):\(port)")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                    if let p = store.profiles.first(where: { $0.id == store.activeProfileID }) {
+                        Text(p.chipLabel)
+                            .font(.title)
+                            .foregroundColor(.primary)
+                        Text("\(p.host):\(p.port)")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+}
+
+// MARK: - Wrapper so the sheet gets its own copy to edit
+
+private struct ProfileEditSheet: View {
+    let initial: VNCProfile
+    let isNew: Bool
+    let onSave: (VNCProfile) -> Void
+    let onCancel: () -> Void
+
+    @State private var draft: VNCProfile
+
+    init(initial: VNCProfile, isNew: Bool,
+         onSave: @escaping (VNCProfile) -> Void,
+         onCancel: @escaping () -> Void) {
+        self.initial  = initial
+        self.isNew    = isNew
+        self.onSave   = onSave
+        self.onCancel = onCancel
+        _draft = State(initialValue: initial)
+    }
+
+    var body: some View {
+        ProfileEditView(profile: $draft, isNew: isNew, onSave: onSave, onCancel: onCancel)
     }
 }
 
