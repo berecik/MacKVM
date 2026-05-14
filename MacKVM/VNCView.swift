@@ -236,6 +236,7 @@ struct FramebufferView: UIViewRepresentable {
     func makeUIView(context: Context) -> VNCUIView {
         let v = VNCUIView()
         v.client = client
+        wireHover(v)
         return v
     }
 
@@ -246,24 +247,47 @@ struct FramebufferView: UIViewRepresentable {
     }
 }
 
-// MARK: - Custom UIView for drawing and touch input (iOS)
+// MARK: - Custom UIView for drawing, touch, keyboard, and pointer input (iOS)
 
 final class VNCUIView: UIView {
 
     var cgImage: CGImage?
     weak var client: VNCClient?
 
+    // Last known pointer position (for scroll events that don't carry location)
+    private var lastPointerX: Int = 0
+    private var lastPointerY: Int = 0
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .black
         isMultipleTouchEnabled = false
-        // Pinch gesture for disconnect (double-tap)
+
+        // Double-tap to disconnect and reveal toolbar
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap))
         doubleTap.numberOfTapsRequired = 2
         addGestureRecognizer(doubleTap)
+
+        // Scroll wheel via pan gesture (two-finger pan on trackpad arrives as scroll)
+        let scroll = UIPanGestureRecognizer(target: self, action: #selector(handleScroll(_:)))
+        scroll.allowedScrollTypesMask = .all
+        addGestureRecognizer(scroll)
+
+        // Pointer interaction for trackpad/mouse hover and button events
+        addInteraction(UIPointerInteraction(delegate: nil))
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    // Become first responder so we receive hardware keyboard events
+    override var canBecomeFirstResponder: Bool { true }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil { becomeFirstResponder() }
+    }
+
+    // MARK: Drawing
 
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext(), let img = cgImage else { return }
@@ -277,7 +301,7 @@ final class VNCUIView: UIView {
         let dh = imgH * scale
         let ox = (bounds.width  - dw) / 2
         let oy = (bounds.height - dh) / 2
-        // UIKit coordinate system is top-left; flip vertically for correct rendering
+        // CGImage is bottom-left origin; flip vertically for UIKit (top-left)
         ctx.saveGState()
         ctx.translateBy(x: ox, y: oy + dh)
         ctx.scaleBy(x: 1, y: -1)
@@ -285,45 +309,187 @@ final class VNCUIView: UIView {
         ctx.restoreGState()
     }
 
-    // MARK: Touch → RFB pointer events
+    // MARK: Hardware keyboard (iPad with Smart Keyboard / Magic Keyboard)
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses {
+            guard let key = press.key else { continue }
+            if let keysym = uiKeyToKeysym(key) {
+                Task { @MainActor in self.client?.sendKeyEvent(keysym: keysym, down: true) }
+            } else {
+                super.pressesBegan([press], with: event)
+            }
+        }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        for press in presses {
+            guard let key = press.key else { continue }
+            if let keysym = uiKeyToKeysym(key) {
+                Task { @MainActor in self.client?.sendKeyEvent(keysym: keysym, down: false) }
+            } else {
+                super.pressesEnded([press], with: event)
+            }
+        }
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        pressesEnded(presses, with: event)
+    }
+
+    // MARK: Touch → RFB pointer (finger touch on screen)
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        becomeFirstResponder()
         guard let t = touches.first else { return }
-        sendPointer(touch: t, mask: 1)
+        // Ignore if this came from the double-tap recogniser
+        sendPointer(at: t.location(in: self), mask: 1)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let t = touches.first else { return }
-        sendPointer(touch: t, mask: 1)
+        sendPointer(at: t.location(in: self), mask: 1)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let t = touches.first else { return }
-        sendPointer(touch: t, mask: 0)
+        sendPointer(at: t.location(in: self), mask: 0)
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard let t = touches.first else { return }
-        sendPointer(touch: t, mask: 0)
+        sendPointer(at: t.location(in: self), mask: 0)
     }
 
     @objc private func handleDoubleTap() {
         Task { @MainActor in client?.disconnect() }
     }
 
-    private func sendPointer(touch: UITouch, mask: Int) {
-        guard let img = cgImage, let client else { return }
-        let loc = touch.location(in: self)
+    // MARK: Scroll (two-finger trackpad scroll or mouse wheel)
+
+    @objc private func handleScroll(_ gr: UIPanGestureRecognizer) {
+        guard gr.state == .changed || gr.state == .began else { return }
+        let vel = gr.velocity(in: self)
+        // Fire one scroll tick per ~60 pt/s of velocity
+        let stepsY = Int(vel.y / 60)
+        let stepsX = Int(vel.x / 60)
+        for _ in 0..<abs(stepsY) {
+            let btn = stepsY > 0 ? 16 : 8   // down : up
+            Task { @MainActor in
+                self.client?.sendPointerEvent(x: self.lastPointerX, y: self.lastPointerY, buttonMask: btn)
+                self.client?.sendPointerEvent(x: self.lastPointerX, y: self.lastPointerY, buttonMask: 0)
+            }
+        }
+        for _ in 0..<abs(stepsX) {
+            let btn = stepsX > 0 ? 32 : 64  // left : right
+            Task { @MainActor in
+                self.client?.sendPointerEvent(x: self.lastPointerX, y: self.lastPointerY, buttonMask: btn)
+                self.client?.sendPointerEvent(x: self.lastPointerX, y: self.lastPointerY, buttonMask: 0)
+            }
+        }
+    }
+
+    // MARK: Indirect pointer events (trackpad / mouse via UIHoverGestureRecognizer)
+    // UIPointerInteraction alone doesn't deliver movement; we use a hover recogniser.
+
+    override func didAddSubview(_ subview: UIView) {
+        super.didAddSubview(subview)
+    }
+
+    // Called by FramebufferView after the view is set up
+    func installHoverRecognizer() {
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(handleHover(_:)))
+        addGestureRecognizer(hover)
+    }
+
+    @objc private func handleHover(_ gr: UIHoverGestureRecognizer) {
+        let loc = gr.location(in: self)
+        sendPointer(at: loc, mask: 0)   // move without button
+    }
+
+    // MARK: Helpers
+
+    private func viewToVNCCoords(_ loc: CGPoint) -> (Int, Int)? {
+        guard let img = cgImage else { return nil }
         let imgW = CGFloat(img.width), imgH = CGFloat(img.height)
+        guard imgW > 0, imgH > 0 else { return nil }
         let scale = min(bounds.width / imgW, bounds.height / imgH)
         let ox = (bounds.width  - imgW * scale) / 2
         let oy = (bounds.height - imgH * scale) / 2
         let nx = (loc.x - ox) / scale
-        let ny = (loc.y - oy) / scale   // UIKit already top-left
-        let x = max(0, min(Int(nx), img.width  - 1))
-        let y = max(0, min(Int(ny), img.height - 1))
+        let ny = (loc.y - oy) / scale
+        return (max(0, min(Int(nx), img.width - 1)),
+                max(0, min(Int(ny), img.height - 1)))
+    }
+
+    private func sendPointer(at loc: CGPoint, mask: Int) {
+        guard let (x, y) = viewToVNCCoords(loc), let client else { return }
+        lastPointerX = x; lastPointerY = y
         Task { @MainActor in client.sendPointerEvent(x: x, y: y, buttonMask: mask) }
     }
+}
+
+// MARK: - FramebufferView wires hover recogniser after the view is ready
+
+// (This extension is inside #else so it only exists on iOS)
+private extension FramebufferView {
+    func wireHover(_ uiView: VNCUIView) {
+        uiView.installHoverRecognizer()
+    }
+}
+
+// MARK: - UIKey → X11 keysym mapping (iOS hardware keyboard)
+
+private func uiKeyToKeysym(_ key: UIKey) -> UInt32? {
+    // Modifier flags → individual keysyms
+    // (UIKey.charactersIgnoringModifiers gives the base character)
+
+    // Special keys via keyCode
+    switch key.keyCode {
+    case .keyboardReturnOrEnter:    return 0xFF0D
+    case .keyboardTab:              return 0xFF09
+    case .keyboardSpacebar:         return 0x0020
+    case .keyboardDeleteOrBackspace:return 0xFF08
+    case .keyboardEscape:           return 0xFF1B
+    case .keyboardDeleteForward:    return 0xFFFF
+    case .keyboardLeftArrow:        return 0xFF51
+    case .keyboardRightArrow:       return 0xFF53
+    case .keyboardDownArrow:        return 0xFF54
+    case .keyboardUpArrow:          return 0xFF52
+    case .keyboardHome:             return 0xFF50
+    case .keyboardEnd:              return 0xFF57
+    case .keyboardPageUp:           return 0xFF55
+    case .keyboardPageDown:         return 0xFF56
+    case .keyboardF1:               return 0xFFBE
+    case .keyboardF2:               return 0xFFBF
+    case .keyboardF3:               return 0xFFC0
+    case .keyboardF4:               return 0xFFC1
+    case .keyboardF5:               return 0xFFC2
+    case .keyboardF6:               return 0xFFC3
+    case .keyboardF7:               return 0xFFC4
+    case .keyboardF8:               return 0xFFC5
+    case .keyboardF9:               return 0xFFC6
+    case .keyboardF10:              return 0xFFC7
+    case .keyboardF11:              return 0xFFC8
+    case .keyboardF12:              return 0xFFC9
+    case .keyboardCapsLock:         return 0xFFE5
+    case .keyboardLeftShift:        return 0xFFE1
+    case .keyboardRightShift:       return 0xFFE2
+    case .keyboardLeftControl:      return 0xFFE3
+    case .keyboardRightControl:     return 0xFFE4
+    case .keyboardLeftAlt:          return 0xFFE9
+    case .keyboardRightAlt:         return 0xFFEA
+    case .keyboardLeftGUI:          return 0xFFEB  // Super/Win
+    case .keyboardRightGUI:         return 0xFFEC
+    default: break
+    }
+
+    // Printable characters: use the character value directly
+    let chars = key.charactersIgnoringModifiers
+    guard !chars.isEmpty, let scalar = chars.unicodeScalars.first?.value else { return nil }
+    if scalar >= 0x20 && scalar <= 0xFF { return scalar }
+    if scalar >= 0x100 { return 0x01000000 | scalar }
+    return nil
 }
 
 #endif
